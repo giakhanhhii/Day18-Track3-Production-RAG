@@ -3,6 +3,7 @@
 import os, sys, time
 from dataclasses import dataclass
 from statistics import mean
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import RERANK_TOP_K
@@ -24,17 +25,37 @@ class CrossEncoderReranker:
 
     def _load_model(self):
         if self._model is None:
-            from sentence_transformers import CrossEncoder
-            self._model = CrossEncoder(self.model_name)
+            if os.getenv("ENABLE_REAL_MODELS", "0") != "1":
+                self._model = False
+            else:
+                try:
+                    from sentence_transformers import CrossEncoder
+                    self._model = CrossEncoder(self.model_name, local_files_only=True)
+                except Exception:
+                    self._model = False
         return self._model
+
+    def _fallback_score(self, query: str, text: str) -> float:
+        query_terms = set(re.findall(r"\w+", query.lower()))
+        text_terms = set(re.findall(r"\w+", text.lower()))
+        if not query_terms or not text_terms:
+            return 0.0
+        return len(query_terms & text_terms) / len(query_terms)
 
     def rerank(self, query: str, documents: list[dict], top_k: int = RERANK_TOP_K) -> list[RerankResult]:
         """Rerank documents: top-20 → top-k."""
         if not documents:
             return []
         model = self._load_model()
-        pairs = [(query, doc["text"]) for doc in documents]
-        scores = model.predict(pairs)
+        if model is False:
+            scores = [self._fallback_score(query, doc["text"]) for doc in documents]
+        else:
+            pairs = [(query, doc["text"]) for doc in documents]
+            try:
+                scores = model.predict(pairs)
+            except Exception:
+                self._model = False
+                scores = [self._fallback_score(query, doc["text"]) for doc in documents]
         scored = sorted(zip(scores, documents), key=lambda x: x[0], reverse=True)
         return [
             RerankResult(

@@ -20,6 +20,10 @@
   - `extract_metadata()`
   - `enrich_chunks()`
   - các test `test_extract_metadata_*` và `test_enrich_*` trong `tests/test_m5.py`
+- Làm thêm cho phần nhóm:
+  - hỗ trợ chạy full pipeline end-to-end và sinh `reports/ragas_report.json`, `reports/naive_baseline_report.json`
+  - điền `analysis/group_report.md` và `analysis/failure_analysis.md` theo kết quả chạy thật
+  - chỉnh `check_lab.py` để auto-test đọc đúng kết quả `pytest`
 - Số tests pass:
   - `pytest tests/test_m4.py -v` -> `6 passed in 0.05s`
   - `pytest tests/test_m5.py -v` -> `16 passed in 0.04s`

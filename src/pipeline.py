@@ -55,7 +55,7 @@ def run_query(query: str, search: HybridSearch, reranker: CrossEncoderReranker) 
     results = search.search(query)
     docs = [{"text": r.text, "score": r.score, "metadata": r.metadata} for r in results]
     reranked = reranker.rerank(query, docs, top_k=RERANK_TOP_K)
-    contexts = [r.text for r in reranked] if reranked else [r.text for r in results[:3]]
+    contexts = [r.text for r in reranked[:1]] if reranked else [r.text for r in results[:1]]
 
     # TODO (nhóm): Replace with LLM generation for better scores
     # from openai import OpenAI

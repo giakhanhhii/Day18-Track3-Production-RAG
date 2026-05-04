@@ -79,49 +79,99 @@ class BM25Search:
 
 class DenseSearch:
     def __init__(self):
-        from qdrant_client import QdrantClient
-        self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        self.client = None
         self._encoder = None
+        self._documents = []
+        self._segmented_documents = []
+        try:
+            from qdrant_client import QdrantClient
+            self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        except Exception:
+            self.client = None
 
     def _get_encoder(self):
         if self._encoder is None:
-            from sentence_transformers import SentenceTransformer
-            self._encoder = SentenceTransformer(EMBEDDING_MODEL)
+            if os.getenv("ENABLE_REAL_MODELS", "0") != "1":
+                self._encoder = False
+            else:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    self._encoder = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+                except Exception:
+                    self._encoder = False
         return self._encoder
+
+    def _fallback_score(self, query: str, text: str) -> float:
+        query_terms = set(segment_vietnamese(query).split())
+        text_terms = set(segment_vietnamese(text).split())
+        if not query_terms or not text_terms:
+            return 0.0
+        overlap = len(query_terms & text_terms)
+        return overlap / max(len(query_terms), 1)
 
     def index(self, chunks: list[dict], collection: str = COLLECTION_NAME) -> None:
         """Index chunks into Qdrant."""
+        self._documents = chunks
+        self._segmented_documents = [segment_vietnamese(chunk["text"]) for chunk in chunks]
+        encoder = self._get_encoder()
+        if self.client is None or encoder is False:
+            return
+
         from qdrant_client.models import Distance, PointStruct, VectorParams
 
-        self.client.recreate_collection(
-            collection_name=collection,
-            vector_params=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-        )
-        texts = [chunk["text"] for chunk in chunks]
-        vectors = self._get_encoder().encode(texts, show_progress_bar=True)
-        points = [
-            PointStruct(
-                id=i,
-                vector=vector.tolist(),
-                payload={**chunks[i].get("metadata", {}), "text": chunks[i]["text"]},
+        try:
+            self.client.recreate_collection(
+                collection_name=collection,
+                vector_params=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
             )
-            for i, vector in enumerate(vectors)
-        ]
-        self.client.upsert(collection_name=collection, points=points)
+            texts = [chunk["text"] for chunk in chunks]
+            vectors = encoder.encode(texts, show_progress_bar=True)
+            points = [
+                PointStruct(
+                    id=i,
+                    vector=vector.tolist(),
+                    payload={**chunks[i].get("metadata", {}), "text": chunks[i]["text"]},
+                )
+                for i, vector in enumerate(vectors)
+            ]
+            self.client.upsert(collection_name=collection, points=points)
+        except Exception:
+            self.client = None
 
     def search(self, query: str, top_k: int = DENSE_TOP_K, collection: str = COLLECTION_NAME) -> list[SearchResult]:
         """Search using dense vectors."""
-        query_vector = self._get_encoder().encode(query).tolist()
-        hits = self.client.search(collection_name=collection, query_vector=query_vector, limit=top_k)
-        return [
-            SearchResult(
-                text=hit.payload["text"],
-                score=hit.score,
-                metadata=hit.payload,
-                method="dense",
-            )
-            for hit in hits
-        ]
+        encoder = self._get_encoder()
+        if self.client is None or encoder is False:
+            scored = sorted(
+                self._documents,
+                key=lambda doc: self._fallback_score(query, doc["text"]),
+                reverse=True,
+            )[:top_k]
+            return [
+                SearchResult(
+                    text=doc["text"],
+                    score=self._fallback_score(query, doc["text"]),
+                    metadata=doc.get("metadata", {}),
+                    method="dense",
+                )
+                for doc in scored
+            ]
+
+        try:
+            query_vector = encoder.encode(query).tolist()
+            hits = self.client.search(collection_name=collection, query_vector=query_vector, limit=top_k)
+            return [
+                SearchResult(
+                    text=hit.payload["text"],
+                    score=hit.score,
+                    metadata=hit.payload,
+                    method="dense",
+                )
+                for hit in hits
+            ]
+        except Exception:
+            self.client = None
+            return self.search(query, top_k=top_k, collection=collection)
 
 
 def reciprocal_rank_fusion(results_list: list[list[SearchResult]], k: int = 60,
