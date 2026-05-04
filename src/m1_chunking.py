@@ -149,8 +149,7 @@ def _openai_embed(texts: list[str]) -> "list[list[float]]":
     import json
 
     api_key = os.getenv(
-        "OPENAI_API_KEY",
-        "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"
+        "OPENAI_API_KEY"
     )
 
     payload = json.dumps({
