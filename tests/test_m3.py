@@ -30,3 +30,5 @@ def test_rerank_relevant_first():
 def test_benchmark_stats():
     stats = benchmark_reranker(CrossEncoderReranker(), Q, DOCS, n_runs=2)
     assert "avg_ms" in stats and "min_ms" in stats and "max_ms" in stats
+    assert stats["avg_ms"] >= 0
+    assert stats["min_ms"] <= stats["avg_ms"] <= stats["max_ms"]
