@@ -7,3 +7,9 @@ __pycache__/
 qdrant_data/
 *.egg-info/
 reports/*.json
+.venv/
+venv/
+.env.example
+.idea/
+.vscode/
+CLAUDE.md

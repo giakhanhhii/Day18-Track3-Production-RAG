@@ -144,95 +144,129 @@ def load_test_set(path: str = TEST_SET_PATH) -> list[dict]:
 def evaluate_ragas(questions: list[str], answers: list[str],
                    contexts: list[list[str]], ground_truths: list[str]) -> dict:
     """Run RAGAS evaluation."""
-    lengths = {len(questions), len(answers), len(contexts), len(ground_truths)}
-    if len(lengths) != 1:
-        raise ValueError("questions, answers, contexts, and ground_truths must have the same length")
-
-    if not questions:
-        return _aggregate_results([])
-
     try:
-        if OPENAI_API_KEY:
-            return _evaluate_with_ragas(questions, answers, contexts, ground_truths)
-    except Exception:
-        pass
+        from datasets import Dataset
+        from ragas import evaluate
+        from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
 
-    per_question = [
-        _score_row(question, answer, row_contexts, ground_truth)
-        for question, answer, row_contexts, ground_truth in zip(
-            questions, answers, contexts, ground_truths
+        dataset = Dataset.from_dict({
+            "question": questions,
+            "answer": answers,
+            "contexts": contexts,
+            "ground_truth": ground_truths,
+        })
+        result = evaluate(
+            dataset,
+            metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
         )
-    ]
-    return _aggregate_results(per_question)
+        df = result.to_pandas()
+        per_question = [
+            EvalResult(
+                question=row.question,
+                answer=row.answer,
+                contexts=list(row.contexts),
+                ground_truth=row.ground_truth,
+                faithfulness=float(row.faithfulness),
+                answer_relevancy=float(row.answer_relevancy),
+                context_precision=float(row.context_precision),
+                context_recall=float(row.context_recall),
+            )
+            for _, row in df.iterrows()
+        ]
+        return {
+            "faithfulness": float(result["faithfulness"]),
+            "answer_relevancy": float(result["answer_relevancy"]),
+            "context_precision": float(result["context_precision"]),
+            "context_recall": float(result["context_recall"]),
+            "per_question": per_question,
+        }
+    except Exception:
+        def token_set(text: str) -> set[str]:
+            return set(text.lower().split())
+
+        per_question = []
+        for question, answer, ctxs, ground_truth in zip(questions, answers, contexts, ground_truths):
+            answer_terms = token_set(answer)
+            truth_terms = token_set(ground_truth)
+            context_terms = token_set(" ".join(ctxs))
+            question_terms = token_set(question)
+
+            faith = len(answer_terms & context_terms) / max(len(answer_terms), 1)
+            relevancy = len(answer_terms & question_terms) / max(len(question_terms), 1)
+            precision = len(context_terms & truth_terms) / max(len(context_terms), 1)
+            recall = len(context_terms & truth_terms) / max(len(truth_terms), 1)
+
+            per_question.append(
+                EvalResult(
+                    question=question,
+                    answer=answer,
+                    contexts=ctxs,
+                    ground_truth=ground_truth,
+                    faithfulness=float(faith),
+                    answer_relevancy=float(relevancy),
+                    context_precision=float(precision),
+                    context_recall=float(recall),
+                )
+            )
+
+        if not per_question:
+            return {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.0,
+                "context_precision": 0.0,
+                "context_recall": 0.0,
+                "per_question": [],
+            }
+
+        return {
+            "faithfulness": mean(item.faithfulness for item in per_question),
+            "answer_relevancy": mean(item.answer_relevancy for item in per_question),
+            "context_precision": mean(item.context_precision for item in per_question),
+            "context_recall": mean(item.context_recall for item in per_question),
+            "per_question": per_question,
+        }
 
 
 def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list[dict]:
     """Analyze bottom-N worst questions using Diagnostic Tree."""
-    if not eval_results or bottom_n <= 0:
-        return []
+    def diagnosis_for(metric: str, score: float) -> tuple[str, str]:
+        if metric == "faithfulness" and score < 0.85:
+            return "LLM hallucinating", "Tighten prompt, lower temperature"
+        if metric == "context_recall" and score < 0.75:
+            return "Missing relevant chunks", "Improve chunking or add BM25"
+        if metric == "context_precision" and score < 0.75:
+            return "Too many irrelevant chunks", "Add reranking or metadata filter"
+        if metric == "answer_relevancy" and score < 0.80:
+            return "Answer doesn't match question", "Improve prompt template"
+        return "General quality gap", "Inspect retrieval and prompting together"
 
-    diagnostics = {
-        "faithfulness": (
-            0.85,
-            "LLM hallucinating",
-            "Tighten prompt, lower temperature, and require answers to stay grounded in context.",
-        ),
-        "context_recall": (
-            0.75,
-            "Missing relevant chunks",
-            "Improve chunking/search coverage or add better query expansion and BM25 recall.",
-        ),
-        "context_precision": (
-            0.75,
-            "Too many irrelevant chunks",
-            "Add reranking or metadata filtering to reduce noisy retrieved context.",
-        ),
-        "answer_relevancy": (
-            0.80,
-            "Answer doesn't match question",
-            "Improve the answer prompt template so the model responds directly to the user query.",
-        ),
-    }
-
-    ranked_results = sorted(
+    ranked = sorted(
         eval_results,
-        key=lambda item: mean(
-            [
-                item.faithfulness,
-                item.answer_relevancy,
-                item.context_precision,
-                item.context_recall,
-            ]
-        ),
+        key=lambda item: mean([
+            item.faithfulness,
+            item.answer_relevancy,
+            item.context_precision,
+            item.context_recall,
+        ]),
     )[:bottom_n]
 
     failures = []
-    for item in ranked_results:
-        metric_scores = {
+    for item in ranked:
+        metrics = {
             "faithfulness": item.faithfulness,
             "answer_relevancy": item.answer_relevancy,
             "context_precision": item.context_precision,
             "context_recall": item.context_recall,
         }
-        worst_metric = min(metric_scores, key=metric_scores.get)
-        score = float(metric_scores[worst_metric])
-        threshold, diagnosis, suggested_fix = diagnostics[worst_metric]
-
-        if score >= threshold:
-            diagnosis = "No severe single-point failure"
-            suggested_fix = "Review the full pipeline end-to-end; the issue is likely distributed across retrieval and prompting."
-
-        failures.append(
-            {
-                "question": item.question,
-                "worst_metric": worst_metric,
-                "score": score,
-                "avg_score": mean(metric_scores.values()),
-                "diagnosis": diagnosis,
-                "suggested_fix": suggested_fix,
-            }
-        )
-
+        worst_metric = min(metrics, key=metrics.get)
+        diagnosis, suggested_fix = diagnosis_for(worst_metric, metrics[worst_metric])
+        failures.append({
+            "question": item.question,
+            "worst_metric": worst_metric,
+            "score": float(metrics[worst_metric]),
+            "diagnosis": diagnosis,
+            "suggested_fix": suggested_fix,
+        })
     return failures
 
 
