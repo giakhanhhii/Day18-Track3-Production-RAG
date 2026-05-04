@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import OPENAI_API_KEY
+
 
 @dataclass
 class EnrichedChunk:
@@ -165,26 +167,38 @@ def summarize_chunk(text: str) -> str:
         text: Raw chunk text.
 
     Returns:
-        Summary string (2-3 câu).
+        Summary string (2-3 câu). Fallback extractive nếu không có API key.
     """
-    # TODO: Implement chunk summarization
-    # Option A (với OpenAI):
-    #   from openai import OpenAI
-    #   client = OpenAI()
-    #   resp = client.chat.completions.create(
-    #       model="gpt-4o-mini",
-    #       messages=[
-    #           {"role": "system", "content": "Tóm tắt đoạn văn sau trong 2-3 câu ngắn gọn bằng tiếng Việt."},
-    #           {"role": "user", "content": text},
-    #       ],
-    #       max_tokens=150,
-    #   )
-    #   return resp.choices[0].message.content.strip()
-    #
-    # Option B (không cần API — extractive):
-    #   sentences = text.split(". ")
-    #   return ". ".join(sentences[:2]) + "."  # Lấy 2 câu đầu
-    return ""
+    if not text.strip():
+        return ""
+
+    # Dùng OpenAI nếu có API key
+    if OPENAI_API_KEY:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Tóm tắt đoạn văn sau trong 2-3 câu ngắn gọn bằng tiếng Việt. "
+                        "Chỉ trả về phần tóm tắt, không giải thích thêm."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            max_tokens=150,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content.strip()
+
+    # Fallback extractive: lấy 2 câu đầu
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    summary = " ".join(sentences[:2])
+    if summary and not summary.endswith((".", "!", "?")):
+        summary += "."
+    return summary
 
 
 # ─── Technique 2: Hypothesis Question-Answer (HyQA) ─────
@@ -202,23 +216,38 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     Returns:
         List of question strings.
     """
-    # TODO: Implement hypothesis question generation
-    # 1. from openai import OpenAI
-    #    client = OpenAI()
-    # 2. resp = client.chat.completions.create(
-    #        model="gpt-4o-mini",
-    #        messages=[
-    #            {"role": "system", "content": f"Dựa trên đoạn văn, tạo {n_questions} câu hỏi mà đoạn văn có thể trả lời. Trả về mỗi câu hỏi trên 1 dòng."},
-    #            {"role": "user", "content": text},
-    #        ],
-    #        max_tokens=200,
-    #    )
-    # 3. questions = resp.choices[0].message.content.strip().split("\n")
-    # 4. return [q.strip().lstrip("0123456789.-) ") for q in questions if q.strip()]
-    #
-    # Tại sao: User hỏi "nghỉ phép bao nhiêu ngày?" nhưng doc viết
-    # "12 ngày làm việc mỗi năm" → vocabulary gap. HyQA bridge gap này
-    # bằng cách index câu hỏi "Nhân viên được nghỉ bao nhiêu ngày?" cùng chunk.
+    if not text.strip():
+        return []
+
+    # Dùng OpenAI nếu có API key
+    if OPENAI_API_KEY:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Dựa trên đoạn văn, tạo đúng {n_questions} câu hỏi mà đoạn văn có thể trả lời. "
+                        "Trả về mỗi câu hỏi trên 1 dòng, không đánh số, không giải thích thêm."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            max_tokens=200,
+            temperature=0.5,
+        )
+        raw = resp.choices[0].message.content.strip().split("\n")
+        # Làm sạch: bỏ số thứ tự, dấu gạch đầu dòng
+        questions = [
+            re.sub(r"^[\d\.\-\)\s]+", "", q).strip()
+            for q in raw
+            if q.strip()
+        ]
+        return questions[:n_questions]
+
+    # Fallback: không có API key → trả về list rỗng
     return []
 
 
@@ -237,23 +266,33 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     Returns:
         Text với context prepended.
     """
-    # TODO: Implement contextual prepend
-    # 1. from openai import OpenAI
-    #    client = OpenAI()
-    # 2. resp = client.chat.completions.create(
-    #        model="gpt-4o-mini",
-    #        messages=[
-    #            {"role": "system", "content": "Viết 1 câu ngắn mô tả đoạn văn này nằm ở đâu trong tài liệu và nói về chủ đề gì. Chỉ trả về 1 câu."},
-    #            {"role": "user", "content": f"Tài liệu: {document_title}\n\nĐoạn văn:\n{text}"},
-    #        ],
-    #        max_tokens=80,
-    #    )
-    # 3. context = resp.choices[0].message.content.strip()
-    # 4. return f"{context}\n\n{text}"
-    #
-    # Ví dụ output:
-    #   "Trích từ Chương 3 - Chính sách nghỉ phép, Sổ tay VinUni 2024.
-    #    Nhân viên chính thức được nghỉ phép năm 12 ngày..."
+    if not text.strip():
+        return text
+
+    # Dùng OpenAI nếu có API key
+    if OPENAI_API_KEY:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        user_content = f"Tài liệu: {document_title}\n\nĐoạn văn:\n{text}" if document_title else f"Đoạn văn:\n{text}"
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Viết 1 câu ngắn mô tả đoạn văn này nằm ở đâu trong tài liệu và nói về chủ đề gì. "
+                        "Chỉ trả về đúng 1 câu, không giải thích thêm."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=80,
+            temperature=0.3,
+        )
+        context_sentence = resp.choices[0].message.content.strip()
+        return f"{context_sentence}\n\n{text}"
+
+    # Fallback: không có API key → trả về text gốc không thay đổi
     return text
 
 
